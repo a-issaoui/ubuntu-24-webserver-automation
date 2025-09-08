@@ -117,15 +117,29 @@ install_packages() {
         sudo apt update -qq
     fi
     
-    # Essential packages
+    # Essential packages (removed problematic ones)
     local packages=(
         "curl" "git" "vim" "htop" "tree" "unattended-upgrades"
         "ufw" "fail2ban" "auditd" "aide" "chrony" "needrestart"
         "docker-ce" "docker-ce-cli" "containerd.io" "docker-compose-plugin"
-        "rkhunter" "chkrootkit" "logwatch" "psad"
     )
     
-    sudo DEBIAN_FRONTEND=noninteractive apt install -y "${packages[@]}" || die "Package installation failed"
+    # Optional security packages (install separately to avoid dependency issues)
+    local optional_packages=(
+        "rkhunter" "chkrootkit" "logwatch"
+    )
+    
+    # Install essential packages first
+    sudo DEBIAN_FRONTEND=noninteractive apt install -y "${packages[@]}" || die "Essential package installation failed"
+    
+    # Try to install optional packages (don't fail if they can't be installed)
+    for package in "${optional_packages[@]}"; do
+        if sudo DEBIAN_FRONTEND=noninteractive apt install -y "$package" 2>/dev/null; then
+            log "Installed optional package: $package"
+        else
+            warn "Could not install optional package: $package"
+        fi
+    done
     
     succ "Packages installed successfully"
 }
