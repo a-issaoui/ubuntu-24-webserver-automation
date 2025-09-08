@@ -442,21 +442,39 @@ EOF
 
 setup_aide() {
     log "Initializing AIDE (file integrity monitoring)"
-    
-    # Initialize AIDE database (this takes time)
+
+    # 1. build initial database
     sudo aideinit --yes --force &
     local aide_pid=$!
-    
-    # Show progress
-    while kill -0 $aide_pid 2>/dev/null; do
-        echo -n "."
-        sleep 2
-    done
+    while kill -0 $aide_pid 2>/dev/null; do echo -n "."; sleep 2; done
     echo
-    
-    # Enable daily checks
-    sudo systemctl enable aide-check.timer
-    
+
+    # 2. ➜➜➜  CREATE THE MISSING UNITS
+    cat <<'EOF' | sudo tee /etc/systemd/system/aide-check.service >/dev/null
+[Unit]
+Description=AIDE integrity check
+After=multi-user.target
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/aide --check
+StandardOutput=journal
+StandardError=journal
+EOF
+
+    cat <<'EOF' | sudo tee /etc/systemd/system/aide-check.timer >/dev/null
+[Unit]
+Description=Daily AIDE integrity check
+Requires=aide-check.service
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=30min
+Persistent=true
+[Install]
+WantedBy=timers.target
+EOF
+
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now aide-check.timer   # ← will succeed now
     succ "AIDE initialized and scheduled"
 }
 
