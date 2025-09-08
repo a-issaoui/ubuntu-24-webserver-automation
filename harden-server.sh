@@ -441,16 +441,10 @@ EOF
 }
 
 setup_aide() {
-    log "Initializing AIDE (file integrity monitoring)"
+  log "Configuring AIDE (file integrity monitoring)"
 
-    # 1. build initial database
-    sudo aideinit --yes --force &
-    local aide_pid=$!
-    while kill -0 $aide_pid 2>/dev/null; do echo -n "."; sleep 2; done
-    echo
-
-    # 2. ➜➜➜  CREATE THE MISSING UNITS
-    cat <<'EOF' | sudo tee /etc/systemd/system/aide-check.service >/dev/null
+  # 1. Create systemd units FIRST (idempotent)
+  sudo tee /etc/systemd/system/aide-check.service >/dev/null <<'EOF'
 [Unit]
 Description=AIDE integrity check
 After=multi-user.target
@@ -461,7 +455,7 @@ StandardOutput=journal
 StandardError=journal
 EOF
 
-    cat <<'EOF' | sudo tee /etc/systemd/system/aide-check.timer >/dev/null
+  sudo tee /etc/systemd/system/aide-check.timer >/dev/null <<'EOF'
 [Unit]
 Description=Daily AIDE integrity check
 Requires=aide-check.service
@@ -472,10 +466,22 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 EOF
+  sudo systemctl daemon-reload
 
-    sudo systemctl daemon-reload
-    sudo systemctl enable --now aide-check.timer   # ← will succeed now
-    succ "AIDE initialized and scheduled"
+  # 2. Build database only if it doesn't exist
+  if [[ ! -f /var/lib/aide/aide.db.new ]]; then
+    log "Building initial AIDE database (this takes a while) ..."
+    sudo aideinit --yes --force &
+    local pid=$!
+    while kill -0 $pid 2>/dev/null; do echo -n "."; sleep 2; done
+    echo
+  else
+    log "AIDE database already exists – skipping build"
+  fi
+
+  # 3. Enable timer
+  sudo systemctl enable --now aide-check.timer
+  succ "AIDE timer enabled"
 }
 
 configure_automatic_updates() {
