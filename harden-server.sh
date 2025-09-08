@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ################################################################################
-# Ubuntu 25.x CIS-inspired hardening – DESTRUCTIVE FOR ROOT SSH
+# Ubuntu 25.x Server Hardening – DESTRUCTIVE FOR ROOT & UBUNTU SSH
 # Run as ubuntu (password-less sudo).  Reboot-safe.
 ################################################################################
 LOG=/var/log/harden.log
@@ -25,7 +25,10 @@ sudo chmod 700 "/home/$NEWUSER/.ssh"
 sudo chmod 600 "/home/$NEWUSER/.ssh/authorized_keys"
 sudo chown -R "$NEWUSER:$NEWUSER" "/home/$NEWUSER"
 
-# 3. ssh hardening
+# 3. lock existing ubuntu account & root
+sudo passwd -l ubuntu
+sudo usermod --expiredate 1 ubuntu
+sudo passwd -l root
 sudo sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
 sudo sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
 sudo sed -i 's/^#\?X11Forwarding.*/X11Forwarding no/' /etc/ssh/sshd_config
@@ -35,10 +38,10 @@ sudo systemctl restart sshd
 sudo apt install -y ufw
 sudo ufw default deny incoming
 sudo ufw default allow outgoing
-sudo ufw allow 22/tcp  comment 'SSH'
-sudo ufw limit 22/tcp    # rate-limit
-sudo ufw allow 80/tcp    comment 'HTTP'
-sudo ufw allow 443/tcp   comment 'HTTPS'
+sudo ufw allow 22/tcp comment 'SSH'
+sudo ufw limit 22/tcp              # rate-limit
+sudo ufw allow 80/tcp comment 'HTTP'
+sudo ufw allow 443/tcp comment 'HTTPS'
 sudo ufw --force enable
 
 # 5. fail2ban (ssh + ufw action)
@@ -47,7 +50,7 @@ cat <<'EOF' | sudo tee /etc/fail2ban/jail.local
 [DEFAULT]
 banaction = ufw
 [sshd]
-enabled = true
+enabled  = true
 maxretry = 3
 bantime  = 3600
 findtime = 600
@@ -132,7 +135,7 @@ sudo augenrules --load
 
 # 10. AIDE (file-integrity)
 sudo apt install -y aide
-sudo aideinit   # builds initial DB
+sudo aideinit                              # initial DB
 cat <<'EOF' | sudo tee /etc/systemd/system/aide-check.timer
 [Unit]
 Description=Daily AIDE check
@@ -152,7 +155,7 @@ EOF
 sudo systemctl daemon-reload
 sudo systemctl enable --now aide-check.timer
 
-# 11. docker (latest stable, repo method)
+# 11. Docker (latest stable)
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker.gpg
 echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
   | sudo tee /etc/apt/sources.list.d/docker.list
@@ -160,12 +163,12 @@ sudo apt update -qq
 sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 sudo systemctl enable --now docker
 
-# 12. lock docker socket (only root & docker group)
+# 12. lock docker socket
 sudo chmod 660 /var/run/docker.sock
 
-# 13. summary
+# 13. final words
 echo -e "${GREEN}=== Hardening complete – reboot recommended ===${NC}"
-echo "SSH only via $NEWUSER + key – root disabled"
-echo "UFW active (22 80 443) – fail2ban watching SSH"
-echo "Unattended-upgrades ON – auditd & AIDE installed"
+echo "SSH only via $NEWUSER + key – root & ubuntu locked"
+echo "UFW active (22 ratelimit, 80, 443) – fail2ban watching SSH"
+echo "Unattended-upgrades ON – auditd & AIDE daily"
 echo "Docker ready – socket locked to root:docker"

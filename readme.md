@@ -106,22 +106,7 @@ Edit the script before running:
 
 ---
 
-## 6. What the Script Does **NOT** Touch
-
-* No Apache, Nginx, PHP, MySQL, Redis, Certbot on the host
-* No cloud-init packages removed (safe on AWS, GCP, Azure, Hetzner, etc.)
-* No automatic reboot (you decide when)
-
----
-
-## 7. Next Step
-
-Move on to the Docker-Compose web stack:
-**Traefik + Apache/Nginx + PHP-FPM 5.6 / 7.4 / 8.1 + MySQL + Redis** – everything runs inside containers, while the host stays minimal.
-
----
-
-## 8. License & Disclaimer
+## 6. License & Disclaimer
 
 * **MIT** – use at your own risk.
 * Test on a throw-away VM first; cloud images vary slightly.
