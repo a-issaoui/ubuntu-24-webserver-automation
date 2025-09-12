@@ -8,22 +8,46 @@ set -euo pipefail
 # Run as user with sudo privileges
 ################################################################################
 
-# ---------- Configuration ----------
-readonly SCRIPT_VERSION="3.2"
-readonly SCRIPT_NAME="Ubuntu Hardening Tool"
-readonly CONFIG_FILE="/etc/hardening/config"
-readonly STATE_FILE="/etc/hardening/state"
-readonly BACKUP_BASE="/etc/hardening/backups"
-readonly LOG_FILE="/var/log/hardening.log"
+# ---------- Variable Declarations ----------
+# Constants
+declare -r SCRIPT_VERSION="3.2"
+declare -r SCRIPT_NAME="Ubuntu Hardening Tool"
+declare -r CONFIG_FILE="/etc/hardening/config"
+declare -r STATE_FILE="/etc/hardening/state"
+declare -r BACKUP_BASE="/etc/hardening/backups"
+declare -r LOG_FILE="/var/log/hardening.log"
+declare -r DEFAULT_NEW_USER="deploy"
+declare -r DEFAULT_SSH_PORT="2222"
+declare -r DEFAULT_BACKUP_DIR="$BACKUP_BASE/$(date +%F_%H-%M)"
 
-# Default configuration (can be overridden)
-DEFAULT_NEW_USER="deploy"
-DEFAULT_SSH_PORT="2222"
-DEFAULT_BACKUP_DIR="$BACKUP_BASE/$(date +%F_%H-%M)"
+# Colors
+declare -r RED=$'\e[31m'
+declare -r GRN=$'\e[32m'
+declare -r YLW=$'\e[33m'
+declare -r BLU=$'\e[34m'
+declare -r MAG=$'\e[35m'
+declare -r CYN=$'\e[36m'
+declare -r WHT=$'\e[37m'
+declare -r NC=$'\e[0m'
 
-# Colors for output
-readonly RED=$'\e[31m' GRN=$'\e[32m' YLW=$'\e[33m' BLU=$'\e[34m'
-readonly MAG=$'\e[35m' CYN=$'\e[36m' WHT=$'\e[37m' NC=$'\e[0m'
+# State variables
+declare HARDENING_STATUS="not_started"
+declare COMPLETED_STEPS=""
+declare BACKUP_DIR=""
+declare NEW_USER="$DEFAULT_NEW_USER"
+declare SSH_PORT="$DEFAULT_SSH_PORT"
+declare ENABLE_FIREWALL="true"
+declare ENABLE_FAIL2BAN="true"
+declare ENABLE_AIDE="true"
+declare ENABLE_DOCKER="true"
+declare ENABLE_AUTO_UPDATES="true"
+declare ENABLE_APPARMOR="true"
+declare ENABLE_MOUNT_HARDENING="true"
+declare ENABLE_FAPOLICYD="false"
+declare ENABLE_RSYSLOG_FORWARD="false"
+declare RSYSLOG_TARGET=""
+declare CREATED_DATE=""
+declare LAST_UPDATE=""
 
 # ---------- Logging Functions ----------
 setup_logging() {
@@ -146,9 +170,12 @@ is_step_completed() {
 
 # ---------- Validation Functions ----------
 validate_system() {
+    local ID=""
+    local VERSION_ID=""
+    local reply=""
+
     log "Validating system compatibility"
 
-    # Check Ubuntu version
     if [[ ! -f /etc/os-release ]]; then
         die "Cannot determine OS version"
     fi
@@ -166,17 +193,14 @@ validate_system() {
         [[ "$reply" =~ ^[Yy]$ ]] || die "User cancelled"
     fi
 
-    # Check if running with sufficient privileges
     if [[ $EUID -eq 0 ]]; then
         die "Do not run this script as root. Use a user with sudo privileges."
     fi
 
-    # Test sudo access
     if ! sudo -v; then
         die "Sudo access required"
     fi
 
-    # Check internet connectivity
     if ! curl -s --connect-timeout 5 https://archive.ubuntu.com > /dev/null; then
         die "Internet connectivity required"
     fi
@@ -187,12 +211,10 @@ validate_system() {
 validate_ssh_key() {
     local ssh_key="$1"
 
-    # Check for Ed25519 key
     if [[ "$ssh_key" =~ ^ssh-ed25519\ [A-Za-z0-9+/]{68}(\ .*)?$ ]]; then
         return 0
     fi
 
-    # Check for RSA key (fallback)
     if [[ "$ssh_key" =~ ^ssh-rsa\ [A-Za-z0-9+/]+(\ .*)?$ ]]; then
         warn "RSA key detected. Ed25519 is recommended for better security."
         return 0
@@ -214,11 +236,10 @@ create_backup() {
 }
 
 restore_backup() {
-    local file backup_dir newest_backup
-    file=$1
-    backup_dir=${2:-$BACKUP_DIR}
+    local file="$1"
+    local backup_dir="${2:-$BACKUP_DIR}"
+    local newest_backup=""
 
-    # Find newest backup using mtime - NUL-safe approach
     newest_backup=$(sudo find "$backup_dir" -type f \
         -name "$(basename "$file").*" \
         -printf '%T@ %p\0' 2>/dev/null | \
@@ -243,15 +264,10 @@ update_system() {
 
     log "Updating system packages"
 
-    # Update package lists
     sudo apt update || die "Failed to update package lists"
-
-    # Upgrade packages
     sudo DEBIAN_FRONTEND=noninteractive apt -y full-upgrade \
         -o Dpkg::Options::="--force-confdef" \
         -o Dpkg::Options::="--force-confold" || die "System upgrade failed"
-
-    # Clean up
     sudo apt autoremove -y
     sudo apt autoclean
 
@@ -267,7 +283,6 @@ install_packages() {
 
     log "Installing essential security packages"
 
-    # Essential packages for Ubuntu 24.04
     local packages=(
         "curl" "git" "vim" "htop" "tree" "net-tools"
         "ufw" "fail2ban" "auditd" "aide" "chrony"
@@ -275,7 +290,6 @@ install_packages() {
         "logwatch" "rkhunter" "chkrootkit"
     )
 
-    # Install packages with proper error handling
     for package in "${packages[@]}"; do
         if ! dpkg -l | grep -q "^ii.*$package "; then
             log "Installing $package"
@@ -287,7 +301,6 @@ install_packages() {
         fi
     done
 
-    # Install Docker if enabled
     if [[ "$ENABLE_DOCKER" == "true" ]]; then
         install_docker
     fi
@@ -304,12 +317,10 @@ install_docker() {
 
     log "Installing Docker"
 
-    # Update package list and install prerequisites
     sudo apt-get update
     sudo apt-get install -y ca-certificates curl gnupg
     sudo install -m 0755 -d /etc/apt/keyrings
 
-    # Add Docker's official GPG key - atomic operation with proper umask
     (
         umask 022
         curl -fsSL https://download.docker.com/linux/ubuntu/gpg | \
@@ -317,13 +328,11 @@ install_docker() {
     )
     sudo chmod a+r /etc/apt/keyrings/docker.asc
 
-    # Add Docker repository - idempotent operation
     echo \
         "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
         https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
         sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
 
-    # Install Docker packages
     sudo apt-get update
     sudo apt-get install -y docker-ce docker-ce-cli containerd.io \
                             docker-buildx-plugin docker-compose-plugin
@@ -332,6 +341,8 @@ install_docker() {
 }
 
 create_admin_user() {
+    local ssh_key=""
+
     if is_step_completed "create_admin_user"; then
         log "Admin user creation already completed, skipping"
         return 0
@@ -339,8 +350,6 @@ create_admin_user() {
 
     log "Setting up admin user: $NEW_USER"
 
-    # Get SSH key from user
-    local ssh_key
     while true; do
         echo
         echo "Please provide your SSH public key for authentication:"
@@ -355,7 +364,6 @@ create_admin_user() {
         error "Invalid SSH key format. Please provide a valid Ed25519 or RSA public key."
     done
 
-    # Create user if doesn't exist
     if ! id "$NEW_USER" &>/dev/null; then
         sudo adduser --disabled-password --gecos "Admin User" "$NEW_USER"
         succ "User $NEW_USER created"
@@ -363,18 +371,15 @@ create_admin_user() {
         warn "User $NEW_USER already exists"
     fi
 
-    # Setup SSH directory and key
     sudo mkdir -p "/home/$NEW_USER/.ssh"
     echo "$ssh_key" | sudo tee "/home/$NEW_USER/.ssh/authorized_keys" > /dev/null
     sudo chmod 700 "/home/$NEW_USER/.ssh"
     sudo chmod 600 "/home/$NEW_USER/.ssh/authorized_keys"
     sudo chown -R "$NEW_USER:$NEW_USER" "/home/$NEW_USER"
 
-    # Setup sudo access
     echo "$NEW_USER ALL=(ALL) NOPASSWD:ALL" | sudo tee "/etc/sudoers.d/99-$NEW_USER" > /dev/null
     sudo chmod 440 "/etc/sudoers.d/99-$NEW_USER"
 
-    # Validate sudoers file
     sudo visudo -c || die "Sudoers configuration invalid"
 
     mark_step_completed "create_admin_user"
@@ -389,35 +394,28 @@ harden_ssh() {
 
     log "Hardening SSH configuration"
 
-    # Backup original config
     create_backup "/etc/ssh/sshd_config"
 
-    # Check if port is available
     if netstat -tuln 2>/dev/null | grep -q ":$SSH_PORT "; then
         die "Port $SSH_PORT is already in use"
     fi
 
-    # Generate fresh host keys
     sudo ssh-keygen -A
 
-    # Create hardened SSH config
     cat <<EOF | sudo tee /etc/ssh/sshd_config > /dev/null
 # Hardened SSH Configuration for Ubuntu 24.04 LTS
 # Generated by $SCRIPT_NAME v$SCRIPT_VERSION on $(date)
 
 Include /etc/ssh/sshd_config.d/*.conf
 
-# Network Configuration
 Port $SSH_PORT
 AddressFamily any
 ListenAddress 0.0.0.0
 ListenAddress ::
 
-# Host Keys
 HostKey /etc/ssh/ssh_host_ed25519_key
 HostKey /etc/ssh/ssh_host_rsa_key
 
-# Security Settings
 PermitRootLogin no
 PasswordAuthentication no
 PubkeyAuthentication yes
@@ -425,22 +423,18 @@ AuthenticationMethods publickey
 ChallengeResponseAuthentication no
 UsePAM yes
 
-# Connection Limits
 MaxAuthTries 3
 MaxSessions 2
 MaxStartups 2:30:10
 LoginGraceTime 30
 
-# Timeout Settings
 ClientAliveInterval 300
 ClientAliveCountMax 2
 
-# Access Control
 AllowUsers $NEW_USER
 DenyUsers root ubuntu
 AllowGroups sudo
 
-# Protocol Settings
 Protocol 2
 TCPKeepAlive no
 Compression no
@@ -450,23 +444,18 @@ PermitUserEnvironment no
 PermitEmptyPasswords no
 UseDNS no
 
-# Logging
 SyslogFacility AUTH
 LogLevel VERBOSE
 
-# Cryptography (Ubuntu 24.04 compatible)
 KexAlgorithms curve25519-sha256@libssh.org,ecdh-sha2-nistp256,ecdh-sha2-nistp384,ecdh-sha2-nistp521,diffie-hellman-group14-sha256,diffie-hellman-group16-sha512
 Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr
 MACs hmac-sha2-256-etm@openssh.com,hmac-sha2-512-etm@openssh.com,umac-128-etm@openssh.com,hmac-sha2-256,hmac-sha2-512,umac-128@openssh.com
 
-# Banner
 Banner /etc/issue.net
 
-# SFTP
 Subsystem sftp /usr/lib/openssh/sftp-server -l INFO -f AUTH
 EOF
 
-    # Create security banner
     cat <<'EOF' | sudo tee /etc/issue.net > /dev/null
 ********************************************************************************
                            AUTHORIZED ACCESS ONLY
@@ -479,7 +468,6 @@ and acknowledge that your activities may be audited.
 ********************************************************************************
 EOF
 
-    # Test SSH configuration
     sudo sshd -t || die "SSH configuration test failed"
 
     mark_step_completed "harden_ssh"
@@ -499,21 +487,15 @@ configure_firewall() {
 
     log "Configuring UFW firewall"
 
-    # Reset and configure UFW
     sudo ufw --force reset > /dev/null
     sudo ufw default deny incoming
     sudo ufw default allow outgoing
     sudo ufw default deny forward
 
-    # Allow SSH with rate limiting
     sudo ufw allow "$SSH_PORT/tcp" comment "SSH (hardened)"
     sudo ufw limit "$SSH_PORT/tcp"
-
-    # Allow common web services
     sudo ufw allow 80/tcp comment "HTTP"
     sudo ufw allow 443/tcp comment "HTTPS"
-
-    # Enable firewall
     sudo ufw --force enable
 
     mark_step_completed "configure_firewall"
@@ -533,23 +515,18 @@ setup_fail2ban() {
 
     log "Configuring Fail2ban"
 
-    # Backup original config
     create_backup "/etc/fail2ban/jail.conf" "jail.conf.original"
 
-    # Create local jail configuration
     cat <<EOF | sudo tee /etc/fail2ban/jail.local > /dev/null
 [DEFAULT]
-# Ban settings
 bantime = 3600
 findtime = 600
 maxretry = 3
 backend = systemd
 
-# Actions
 banaction = ufw
 action = %(action_mwl)s
 
-# Network settings
 ignoreip = 127.0.0.1/8 ::1
 
 [sshd]
@@ -572,7 +549,6 @@ logpath = /var/log/apache*/*error.log
 maxretry = 3
 EOF
 
-    # Start and enable fail2ban
     sudo systemctl enable fail2ban
     sudo systemctl restart fail2ban
 
@@ -588,12 +564,9 @@ harden_kernel() {
 
     log "Applying kernel security hardening"
 
-    # Backup original sysctl config
     create_backup "/etc/sysctl.conf"
 
-    # Create kernel hardening configuration
     cat <<'EOF' | sudo tee /etc/sysctl.d/99-hardening.conf > /dev/null
-# Network Security Hardening
 net.ipv4.tcp_syncookies = 1
 net.ipv4.conf.all.rp_filter = 1
 net.ipv4.conf.default.rp_filter = 1
@@ -615,8 +588,6 @@ net.ipv4.icmp_echo_ignore_broadcasts = 1
 net.ipv4.icmp_ignore_bogus_error_responses = 1
 net.ipv4.ip_forward = 0
 net.ipv6.conf.all.forwarding = 0
-
-# Kernel Security
 kernel.yama.ptrace_scope = 1
 kernel.kptr_restrict = 2
 kernel.dmesg_restrict = 1
@@ -624,19 +595,14 @@ kernel.printk = 3 3 3 3
 kernel.unprivileged_bpf_disabled = 1
 net.core.bpf_jit_harden = 2
 kernel.unprivileged_userns_clone = 0
-
-# File System Security
 fs.suid_dumpable = 0
 fs.protected_hardlinks = 1
 fs.protected_symlinks = 1
 fs.protected_fifos = 2
 fs.protected_regular = 2
-
-# Memory Protection
 kernel.randomize_va_space = 2
 EOF
 
-    # Apply kernel parameters
     sudo sysctl -p /etc/sysctl.d/99-hardening.conf > /dev/null
 
     mark_step_completed "harden_kernel"
@@ -651,18 +617,10 @@ setup_auditing() {
 
     log "Configuring system auditing (auditd)"
 
-    # Create audit rules
     cat <<'EOF' | sudo tee /etc/audit/rules.d/99-hardening.rules > /dev/null
-# Delete existing rules
 -D
-
-# Buffer size
 -b 8192
-
-# Failure mode (0=silent, 1=printk, 2=panic)
 -f 1
-
-# Monitor authentication files
 -w /etc/passwd -p wa -k identity
 -w /etc/group -p wa -k identity
 -w /etc/shadow -p wa -k identity
@@ -670,41 +628,26 @@ setup_auditing() {
 -w /etc/security/opasswd -p wa -k identity
 -w /etc/sudoers -p wa -k scope
 -w /etc/sudoers.d/ -p wa -k scope
-
-# Monitor SSH
 -w /etc/ssh/sshd_config -p wa -k sshd
 -w /etc/ssh/ssh_config -p wa -k sshd
-
-# Monitor login/logout events
 -w /var/log/lastlog -p wa -k logins
 -w /var/run/faillock/ -p wa -k logins
-
-# Monitor network configuration
 -w /etc/hosts -p wa -k network
 -w /etc/network/ -p wa -k network
 -w /etc/networks -p wa -k network
-
-# Monitor time changes
 -a always,exit -F arch=b64 -S adjtimex -S settimeofday -k time-change
 -a always,exit -F arch=b32 -S adjtimex -S settimeofday -S stime -k time-change
 -a always,exit -F arch=b64 -S clock_settime -k time-change
 -a always,exit -F arch=b32 -S clock_settime -k time-change
 -w /etc/localtime -p wa -k time-change
-
-# Monitor file permissions
 -a always,exit -F arch=b64 -S chmod -S fchmod -S fchmodat -F auid>=1000 -F auid!=4294967295 -k perm-mod
 -a always,exit -F arch=b32 -S chmod -S fchmod -S fchmodat -F auid>=1000 -F auid!=4294967295 -k perm-mod
 -a always,exit -F arch=b64 -S chown -S fchown -S fchownat -S lchown -F auid>=1000 -F auid!=4294967295 -k perm-mod
 -a always,exit -F arch=b32 -S chown -S fchown -S fchownat -S lchown -F auid>=1000 -F auid!=4294967295 -k perm-mod
-
-# Make configuration immutable (reboot required to change)
 -e 2
 EOF
 
-    # Load audit rules
     sudo augenrules --load > /dev/null 2>&1 || true
-
-    # Enable and start auditd
     sudo systemctl enable auditd
     sudo systemctl restart auditd
 
@@ -725,7 +668,6 @@ setup_aide() {
 
     log "Configuring AIDE (Advanced Intrusion Detection Environment)"
 
-    # Create systemd service for AIDE checks
     cat <<'EOF' | sudo tee /etc/systemd/system/aide-check.service > /dev/null
 [Unit]
 Description=AIDE integrity check
@@ -738,7 +680,6 @@ StandardOutput=journal
 StandardError=journal
 EOF
 
-    # Create systemd timer for daily checks
     cat <<'EOF' | sudo tee /etc/systemd/system/aide-check.timer > /dev/null
 [Unit]
 Description=Daily AIDE integrity check
@@ -755,36 +696,30 @@ EOF
 
     sudo systemctl daemon-reload
 
-    # Initialize AIDE database (this can take a while)
     if [[ ! -f /var/lib/aide/aide.db ]]; then
         log "Initializing AIDE database (this may take several minutes)..."
         sudo aideinit --yes --force >/dev/null 2>&1 &
         local aide_pid=$!
 
-        # Show progress
         while kill -0 $aide_pid 2>/dev/null; do
             echo -n "."
             sleep 5
         done
         echo
 
-        # Move database into place
         if [[ -f /var/lib/aide/aide.db.new ]]; then
             sudo mv /var/lib/aide/aide.db.new /var/lib/aide/aide.db
         fi
     fi
 
-    # Enable timer
     sudo systemctl enable --now aide-check.timer
 
     mark_step_completed "setup_aide"
     succ "AIDE configured with daily integrity checks"
 }
 
-# ---------- CIS Level 1 / DISA STIG Enhancements ----------
-
 setup_apparmor() {
-    if [[ "${ENABLE_APPARMOR:-false}" != "true" ]]; then
+    if [[ "$ENABLE_APPARMOR" != "true" ]]; then
         log "AppArmor disabled in config"
         return 0
     fi
@@ -796,10 +731,8 @@ setup_apparmor() {
 
     log "Enforcing AppArmor profiles for CIS/STIG compliance"
 
-    # Install AppArmor profiles and utilities
     sudo apt install -y apparmor-profiles apparmor-utils
 
-    # Load and enforce every available profile (idempotent operation)
     if [[ -d /etc/apparmor.d ]]; then
         sudo find /etc/apparmor.d -maxdepth 1 -type f \( -name '*.profile' -o -name 'usr.*' -o -name 'sbin.*' \) \
              -exec basename {} .profile \; 2>/dev/null | while read -r prof; do
@@ -810,7 +743,6 @@ setup_apparmor() {
         done
     fi
 
-    # Enable AppArmor in GRUB configuration if not already enabled
     if ! grep -q 'apparmor=1' /etc/default/grub 2>/dev/null; then
         create_backup /etc/default/grub
         sudo sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT="/GRUB_CMDLINE_LINUX_DEFAULT="apparmor=1 security=apparmor /' /etc/default/grub
@@ -823,7 +755,7 @@ setup_apparmor() {
 }
 
 setup_mount_hardening() {
-    if [[ "${ENABLE_MOUNT_HARDENING:-false}" != "true" ]]; then
+    if [[ "$ENABLE_MOUNT_HARDENING" != "true" ]]; then
         log "Mount hardening disabled in config"
         return 0
     fi
@@ -835,25 +767,17 @@ setup_mount_hardening() {
 
     log "Applying mount-option hardening for CIS/STIG compliance"
 
-    # Define critical mount points to harden with nodev, nosuid, noexec
-    # Using systemd mount units to avoid touching /etc/fstab directly (rollback-safe)
-    local mounts=(
-        "/tmp"
-        "/var/tmp"
-        "/home"
-    )
+    local mounts=("/tmp" "/var/tmp" "/home")
 
     for mp in "${mounts[@]}"; do
         local unit_name
         unit_name=$(systemd-escape -p --suffix=mount "$mp")
 
-        # Skip if systemd unit already exists (idempotent)
         if [[ -f "/etc/systemd/system/$unit_name" ]]; then
             log "Mount unit $unit_name already exists, skipping"
             continue
         fi
 
-        # Only create mount unit if the directory exists
         if [[ -d "$mp" ]]; then
             cat <<EOF | sudo tee "/etc/systemd/system/$unit_name" >/dev/null
 [Unit]
@@ -884,7 +808,7 @@ EOF
 }
 
 setup_fapolicyd() {
-    if [[ "${ENABLE_FAPOLICYD:-false}" != "true" ]]; then
+    if [[ "$ENABLE_FAPOLICYD" != "true" ]]; then
         log "Fapolicyd (application allowlisting) disabled in config"
         return 0
     fi
@@ -896,10 +820,7 @@ setup_fapolicyd() {
 
     log "Installing fapolicyd for application allowlisting (STIG requirement)"
 
-    # Install fapolicyd package
     sudo apt install -y fapolicyd
-
-    # Enable and start the service
     sudo systemctl enable --now fapolicyd
 
     mark_step_completed "setup_fapolicyd"
@@ -908,7 +829,7 @@ setup_fapolicyd() {
 }
 
 setup_rsyslog_forward() {
-    if [[ "${ENABLE_RSYSLOG_FORWARD:-false}" != "true" ]]; then
+    if [[ "$ENABLE_RSYSLOG_FORWARD" != "true" ]]; then
         log "Rsyslog forwarding disabled in config"
         return 0
     fi
@@ -920,27 +841,19 @@ setup_rsyslog_forward() {
 
     log "Configuring rsyslog forwarding for centralized logging"
 
-    # Check if target is configured
-    local target="${RSYSLOG_TARGET:-}"
+    local target="$RSYSLOG_TARGET"
     if [[ -z "$target" ]]; then
         warn "RSYSLOG_TARGET not configured. Set it in configuration to enable forwarding."
         return 0
     fi
 
-    # Backup original rsyslog config
     create_backup /etc/rsyslog.conf
 
-    # Create forwarding configuration
     cat <<EOF | sudo tee /etc/rsyslog.d/99-forward.conf >/dev/null
-# Forward all logs to remote loghost
-# Generated by $SCRIPT_NAME v$SCRIPT_VERSION
 *.* @@$target
-
-# Optional: Also log locally (comment out to send only to remote)
 & stop
 EOF
 
-    # Restart rsyslog service
     sudo systemctl restart rsyslog
 
     mark_step_completed "setup_rsyslog_forward"
@@ -960,44 +873,25 @@ configure_auto_updates() {
 
     log "Configuring automatic security updates"
 
-    # Configure unattended upgrades
     cat <<'EOF' | sudo tee /etc/apt/apt.conf.d/50unattended-upgrades > /dev/null
-// Automatically upgrade packages from these origin patterns
 Unattended-Upgrade::Allowed-Origins {
     "${distro_id}:${distro_codename}";
     "${distro_id}:${distro_codename}-security";
     "${distro_id}ESMApps:${distro_codename}-apps-security";
     "${distro_id}ESM:${distro_codename}-infra-security";
 };
-
-// Package blacklist - add packages you never want to update automatically
 Unattended-Upgrade::Package-Blacklist {
-    // "kernel*";
-    // "docker*";
 };
-
-// Automatically reboot if needed (disabled by default for safety)
 Unattended-Upgrade::Automatic-Reboot "false";
 Unattended-Upgrade::Automatic-Reboot-Time "02:00";
-
-// Remove unused dependencies
 Unattended-Upgrade::Remove-Unused-Dependencies "true";
 Unattended-Upgrade::Remove-New-Unused-Dependencies "true";
-
-// Email notifications (configure as needed)
-// Unattended-Upgrade::Mail "admin@example.com";
-Unattended-Upgrade::MailReport "on-change";
-
-// Logging
 Unattended-Upgrade::SyslogEnable "true";
 Unattended-Upgrade::SyslogFacility "daemon";
-
-// Handle dpkg prompts
 Unattended-Upgrade::AutoFixInterruptedDpkg "true";
 Unattended-Upgrade::MinimalSteps "true";
 EOF
 
-    # Configure auto-update intervals
     cat <<'EOF' | sudo tee /etc/apt/apt.conf.d/20auto-upgrades > /dev/null
 APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
@@ -1006,7 +900,6 @@ APT::Periodic::AutocleanInterval "7";
 APT::Periodic::Verbose "1";
 EOF
 
-    # Enable and start the service
     sudo systemctl enable --now unattended-upgrades
 
     mark_step_completed "configure_auto_updates"
@@ -1026,11 +919,9 @@ secure_docker() {
 
     log "Securing Docker installation"
 
-    # Create docker group and add user
     sudo groupadd -f docker
     sudo usermod -aG docker "$NEW_USER"
 
-    # Create secure Docker daemon configuration
     sudo mkdir -p /etc/docker
     cat <<'EOF' | sudo tee /etc/docker/daemon.json > /dev/null
 {
@@ -1054,7 +945,6 @@ secure_docker() {
 }
 EOF
 
-    # Create Docker security profile
     sudo mkdir -p /etc/systemd/system/docker.service.d
     cat <<'EOF' | sudo tee /etc/systemd/system/docker.service.d/security.conf > /dev/null
 [Service]
@@ -1066,7 +956,6 @@ ProtectControlGroups=yes
 RestrictSUIDSGID=yes
 EOF
 
-    # Reload systemd and restart Docker
     sudo systemctl daemon-reload
     sudo systemctl restart docker
     sudo systemctl enable docker
@@ -1075,11 +964,12 @@ EOF
     succ "Docker security configuration applied"
 }
 
-# ---------- Test and Verification Functions ----------
 test_ssh_connection() {
+    local server_ip=""
+    local response=""
+
     log "Testing SSH connection on port $SSH_PORT"
 
-    local server_ip
     server_ip=$(hostname -I | awk '{print $1}')
 
     echo
@@ -1094,7 +984,6 @@ test_ssh_connection() {
     echo "If SSH test fails, you may lose access to the server."
     echo
 
-    local response
     while true; do
         read -rp "Have you successfully tested SSH access? (yes/no): " response
         case "${response,,}" in
@@ -1113,20 +1002,19 @@ test_ssh_connection() {
 }
 
 restart_services() {
+    local services=("fail2ban" "ufw")
+    local service=""
+
     log "Restarting critical services"
 
-    # Restart SSH with new configuration
     log "Restarting SSH service"
     sudo systemctl restart sshd || die "Failed to restart SSH service"
 
-    # Verify SSH is running on new port
     sleep 3
     if ! netstat -tuln | grep -q ":$SSH_PORT "; then
         die "SSH service not listening on port $SSH_PORT"
     fi
 
-    # Restart other services
-    local services=("fail2ban" "ufw")
     for service in "${services[@]}"; do
         if systemctl is-active --quiet "$service"; then
             sudo systemctl restart "$service"
@@ -1145,7 +1033,6 @@ lock_default_accounts() {
 
     log "Locking default accounts (FINAL SECURITY STEP)"
 
-    # Lock ubuntu user if it exists - using idiomatic commands
     if id ubuntu &>/dev/null; then
         sudo usermod -L ubuntu
         sudo chage -E 0 ubuntu
@@ -1153,12 +1040,10 @@ lock_default_accounts() {
         succ "Ubuntu account locked and disabled"
     fi
 
-    # Lock root account - using idiomatic commands
     sudo usermod -L root
     sudo chage -E 0 root
     succ "Root account locked"
 
-    # Remove ubuntu from sudo group
     sudo deluser ubuntu sudo 2>/dev/null || true
 
     mark_step_completed "lock_accounts"
@@ -1166,17 +1051,16 @@ lock_default_accounts() {
 }
 
 verify_hardening() {
+    local issues=0
+    local critical_services=("ssh" "auditd")
+
     log "Running security verification checks"
 
-    local issues=0
-
-    # Check SSH configuration
     if ! sudo sshd -t; then
         error "SSH configuration test failed"
         ((issues++))
     fi
 
-    # Check firewall status
     if [[ "$ENABLE_FIREWALL" == "true" ]]; then
         if ! sudo ufw status | grep -q "Status: active"; then
             error "UFW firewall not active"
@@ -1184,9 +1068,9 @@ verify_hardening() {
         fi
     fi
 
-    # Check critical services
-    local critical_services=("ssh" "auditd")
-    [[ "$ENABLE_FAIL2BAN" == "true" ]] && critical_services+=("fail2ban")
+    if [[ "$ENABLE_FAIL2BAN" == "true" ]]; then
+        critical_services+=("fail2ban")
+    fi
 
     for service in "${critical_services[@]}"; do
         if ! systemctl is-active --quiet "$service"; then
@@ -1195,19 +1079,16 @@ verify_hardening() {
         fi
     done
 
-    # Check user creation
     if ! id "$NEW_USER" &>/dev/null; then
         error "Admin user $NEW_USER was not created"
         ((issues++))
     fi
 
-    # Check kernel hardening
     if [[ ! -f /etc/sysctl.d/99-hardening.conf ]]; then
         error "Kernel hardening configuration not found"
         ((issues++))
     fi
 
-    # Check AppArmor if enabled
     if [[ "$ENABLE_APPARMOR" == "true" ]] && ! systemctl is-active --quiet apparmor; then
         warn "AppArmor service not active"
     fi
@@ -1221,7 +1102,6 @@ verify_hardening() {
     fi
 }
 
-# ---------- Rollback Functions ----------
 rollback_ssh() {
     log "Rolling back SSH configuration"
     if restore_backup "/etc/ssh/sshd_config"; then
@@ -1241,7 +1121,6 @@ rollback_kernel() {
     log "Rolling back kernel hardening"
     if [[ -f /etc/sysctl.d/99-hardening.conf ]]; then
         sudo rm -f /etc/sysctl.d/99-hardening.conf
-        # Apply original settings
         if restore_backup "/etc/sysctl.conf"; then
             sudo sysctl -p > /dev/null
         fi
@@ -1252,18 +1131,15 @@ rollback_kernel() {
 rollback_user() {
     log "Rolling back user changes"
 
-    # Remove created user
     if id "$NEW_USER" &>/dev/null; then
         sudo userdel -r "$NEW_USER" 2>/dev/null || sudo userdel "$NEW_USER"
         log "Removed user $NEW_USER"
     fi
 
-    # Remove sudo file
     if [[ -f "/etc/sudoers.d/99-$NEW_USER" ]]; then
         sudo rm -f "/etc/sudoers.d/99-$NEW_USER"
     fi
 
-    # Unlock ubuntu account - using idiomatic commands
     if id ubuntu &>/dev/null; then
         sudo usermod -U ubuntu
         sudo chage -E -1 ubuntu
@@ -1287,15 +1163,13 @@ rollback_docker_systemd() {
     fi
 }
 
-# ---------- CIS/STIG Rollback Functions ----------
 rollback_apparmor() {
-    if [[ "${ENABLE_APPARMOR:-false}" != "true" ]]; then
+    if [[ "$ENABLE_APPARMOR" != "true" ]]; then
         return 0
     fi
 
     log "Rolling back AppArmor configuration"
 
-    # Return every profile to complain mode (keeps profiles but disables enforcement)
     if [[ -d /etc/apparmor.d ]]; then
         sudo find /etc/apparmor.d -maxdepth 1 -type f \( -name '*.profile' -o -name 'usr.*' -o -name 'sbin.*' \) \
              -exec basename {} .profile \; 2>/dev/null | while read -r prof; do
@@ -1306,7 +1180,6 @@ rollback_apparmor() {
         done
     fi
 
-    # Restore GRUB configuration if we have a backup
     if restore_backup "/etc/default/grub"; then
         sudo update-grub
         log "GRUB configuration restored"
@@ -1316,43 +1189,38 @@ rollback_apparmor() {
 }
 
 rollback_mount_hardening() {
-    if [[ "${ENABLE_MOUNT_HARDENING:-false}" != "true" ]]; then
+    if [[ "$ENABLE_MOUNT_HARDENING" != "true" ]]; then
         return 0
     fi
 
     log "Rolling back mount hardening"
 
-    # Remove systemd mount units for hardened mount points
     local mounts=("/tmp" "/var/tmp" "/home")
     for mp in "${mounts[@]}"; do
         local unit_name
         unit_name=$(systemd-escape -p --suffix=mount "$mp")
 
-        # Stop and disable the mount unit
         sudo systemctl stop "$unit_name" 2>/dev/null || true
         sudo systemctl disable "$unit_name" 2>/dev/null || true
 
-        # Remove the unit file
         if [[ -f "/etc/systemd/system/$unit_name" ]]; then
             sudo rm -f "/etc/systemd/system/$unit_name"
             log "Removed mount hardening unit: $unit_name"
         fi
     done
 
-    # Reload systemd configuration
     sudo systemctl daemon-reload
 
     succ "Mount hardening units removed"
 }
 
 rollback_fapolicyd() {
-    if [[ "${ENABLE_FAPOLICYD:-false}" != "true" ]]; then
+    if [[ "$ENABLE_FAPOLICYD" != "true" ]]; then
         return 0
     fi
 
     log "Rolling back fapolicyd configuration"
 
-    # Stop and disable fapolicyd
     sudo systemctl stop fapolicyd 2>/dev/null || true
     sudo systemctl disable fapolicyd 2>/dev/null || true
 
@@ -1360,18 +1228,16 @@ rollback_fapolicyd() {
 }
 
 rollback_rsyslog_forward() {
-    if [[ "${ENABLE_RSYSLOG_FORWARD:-false}" != "true" ]]; then
+    if [[ "$ENABLE_RSYSLOG_FORWARD" != "true" ]]; then
         return 0
     fi
 
     log "Rolling back rsyslog forwarding"
 
-    # Remove forwarding configuration
     if [[ -f /etc/rsyslog.d/99-forward.conf ]]; then
         sudo rm -f /etc/rsyslog.d/99-forward.conf
     fi
 
-    # Restore original rsyslog configuration if backup exists
     if restore_backup "/etc/rsyslog.conf"; then
         sudo systemctl restart rsyslog
         log "Rsyslog configuration restored"
@@ -1381,22 +1247,21 @@ rollback_rsyslog_forward() {
 }
 
 full_rollback() {
+    local response=""
+
     warn "=== PERFORMING FULL ROLLBACK ==="
     warn "This will attempt to restore all original configurations"
     echo
 
-    local response
     read -rp "Are you sure you want to rollback all changes? (yes/no): " response
     if [[ "${response,,}" != "yes" && "${response,,}" != "y" ]]; then
         log "Rollback cancelled by user"
         return 0
     fi
 
-    # Stop services first
     sudo systemctl stop fail2ban 2>/dev/null || true
     sudo systemctl disable fail2ban 2>/dev/null || true
 
-    # Rollback in reverse order of installation
     rollback_rsyslog_forward
     rollback_fapolicyd
     rollback_mount_hardening
@@ -1407,7 +1272,6 @@ full_rollback() {
     rollback_ssh
     rollback_user
 
-    # Remove hardening files
     sudo rm -rf /etc/hardening
     sudo rm -f /etc/audit/rules.d/99-hardening.rules
     sudo rm -f /etc/fail2ban/jail.local
@@ -1415,7 +1279,6 @@ full_rollback() {
     sudo rm -f /etc/apt/apt.conf.d/50unattended-upgrades
     sudo rm -f /etc/apt/apt.conf.d/20auto-upgrades
 
-    # Reload audit rules
     sudo augenrules --load > /dev/null 2>&1 || true
     sudo systemctl daemon-reload
 
@@ -1423,7 +1286,6 @@ full_rollback() {
     warn "Please reboot the system to ensure all changes take effect"
 }
 
-# ---------- Menu System ----------
 show_status() {
     echo
     echo "${BLU}=== SYSTEM HARDENING STATUS ===${NC}"
@@ -1524,21 +1386,23 @@ view_configuration() {
 }
 
 edit_configuration() {
+    local new_user=""
+    local new_port=""
+    local response=""
+    local rsyslog_target=""
+
     clear
     echo "${CYN}=== Edit Configuration ===${NC}"
     echo
 
-    # Load current config
     load_state
 
-    # Edit user
     echo "Current admin user: ${NEW_USER:-$DEFAULT_NEW_USER}"
     read -rp "Enter new admin username (or press Enter to keep current): " new_user
     if [[ -n "$new_user" ]]; then
         NEW_USER="$new_user"
     fi
 
-    # Edit SSH port
     echo "Current SSH port: ${SSH_PORT:-$DEFAULT_SSH_PORT}"
     read -rp "Enter new SSH port (or press Enter to keep current): " new_port
     if [[ -n "$new_port" ]] && [[ "$new_port" =~ ^[0-9]+$ ]] && [ "$new_port" -ge 1024 ] && [ "$new_port" -le 65535 ]; then
@@ -1549,7 +1413,6 @@ edit_configuration() {
         return 1
     fi
 
-    # Enable/disable features
     echo
     echo "Enable/Disable Features (y/n):"
 
@@ -1580,13 +1443,11 @@ edit_configuration() {
     read -rp "Enable Rsyslog Forwarding? (y/n): " response
     ENABLE_RSYSLOG_FORWARD=$([[ "${response,,}" =~ ^y ]] && echo "true" || echo "false")
 
-    # Configure rsyslog target if enabled
     if [[ "$ENABLE_RSYSLOG_FORWARD" == "true" ]]; then
         read -rp "Enter rsyslog target (IP:port, e.g., logserver.example.com:514): " rsyslog_target
         RSYSLOG_TARGET="${rsyslog_target:-}"
     fi
 
-    # Save configuration
     cat <<EOF | sudo tee "$CONFIG_FILE" > /dev/null
 # Hardening Configuration File - Updated $(date)
 NEW_USER="$NEW_USER"
@@ -1651,7 +1512,6 @@ test_current_setup() {
 
     log "Running system tests"
 
-    # Test SSH
     echo -n "Testing SSH configuration... "
     if sudo sshd -t 2>/dev/null; then
         echo "${GRN}OK${NC}"
@@ -1659,7 +1519,6 @@ test_current_setup() {
         echo "${RED}FAILED${NC}"
     fi
 
-    # Test Firewall
     echo -n "Testing UFW firewall... "
     if sudo ufw status | grep -q "Status: active"; then
         echo "${GRN}ACTIVE${NC}"
@@ -1667,7 +1526,6 @@ test_current_setup() {
         echo "${YLW}INACTIVE${NC}"
     fi
 
-    # Test Fail2ban
     echo -n "Testing Fail2ban... "
     if systemctl is-active --quiet fail2ban; then
         echo "${GRN}RUNNING${NC}"
@@ -1675,7 +1533,6 @@ test_current_setup() {
         echo "${YLW}NOT RUNNING${NC}"
     fi
 
-    # Test Auditd
     echo -n "Testing Audit system... "
     if systemctl is-active --quiet auditd; then
         echo "${GRN}RUNNING${NC}"
@@ -1683,7 +1540,6 @@ test_current_setup() {
         echo "${YLW}NOT RUNNING${NC}"
     fi
 
-    # Test Docker
     echo -n "Testing Docker... "
     if command -v docker &> /dev/null && systemctl is-active --quiet docker; then
         echo "${GRN}RUNNING${NC}"
@@ -1691,7 +1547,6 @@ test_current_setup() {
         echo "${YLW}NOT INSTALLED/RUNNING${NC}"
     fi
 
-    # Test AppArmor
     echo -n "Testing AppArmor... "
     if systemctl is-active --quiet apparmor; then
         echo "${GRN}RUNNING${NC}"
@@ -1699,7 +1554,6 @@ test_current_setup() {
         echo "${YLW}NOT RUNNING${NC}"
     fi
 
-    # Test Fapolicyd
     echo -n "Testing Fapolicyd... "
     if systemctl is-active --quiet fapolicyd; then
         echo "${GRN}RUNNING${NC}"
@@ -1711,25 +1565,23 @@ test_current_setup() {
     read -rp "Press Enter to continue..."
 }
 
-# ---------- Full Hardening Process ----------
 run_full_hardening() {
+    local response=""
+
     clear
     echo "${CYN}=== Starting Full Hardening Process ===${NC}"
     echo
 
-    # Check if already in progress or completed
     if [[ "$HARDENING_STATUS" == "completed" ]]; then
         warn "System appears to already be hardened!"
         echo "Completed steps: $COMPLETED_STEPS"
         echo
-        local response
         read -rp "Do you want to re-run the hardening process? (y/n): " response
         if [[ ! "${response,,}" =~ ^y ]]; then
             return 0
         fi
     fi
 
-    # Confirm before starting
     echo "${YLW}This will perform the following actions:${NC}"
     echo "  • Update system packages"
     echo "  • Install security tools"
@@ -1746,52 +1598,43 @@ run_full_hardening() {
     echo "${RED}and lock default accounts. Ensure you have console access!${NC}"
     echo
 
-    local response
     read -rp "Do you want to continue? (yes/no): " response
     if [[ "${response,,}" != "yes" ]]; then
         log "Full hardening cancelled by user"
         return 0
     fi
 
-    # Initialize
     save_state "starting"
     BACKUP_DIR="$DEFAULT_BACKUP_DIR"
 
-    # Execute hardening steps
     echo
     log "=== STARTING HARDENING PROCESS ==="
 
-    # Phase 1: System preparation
     echo "${BLU}Phase 1: System Preparation${NC}"
     update_system
     install_packages
 
-    # Phase 2: User and access management
     echo "${BLU}Phase 2: Access Control${NC}"
     create_admin_user
     harden_ssh
 
-    # Phase 3: Network security
     echo "${BLU}Phase 3: Network Security${NC}"
     configure_firewall
     setup_fail2ban
 
-    # Phase 4: System hardening
     echo "${BLU}Phase 4: System Hardening${NC}"
     harden_kernel
     setup_auditing
     setup_aide
-    setup_apparmor           # CIS Level 1 / STIG
-    setup_mount_hardening    # CIS Level 1 / STIG
+    setup_apparmor
+    setup_mount_hardening
     configure_auto_updates
     secure_docker
 
-    # Phase 5: Optional advanced hardening
     echo "${BLU}Phase 5: Advanced Security Features${NC}"
-    setup_fapolicyd          # Optional STIG requirement
-    setup_rsyslog_forward    # Optional centralized logging
+    setup_fapolicyd
+    setup_rsyslog_forward
 
-    # Phase 6: Testing and verification
     echo "${BLU}Phase 6: Verification${NC}"
     if ! verify_hardening; then
         error "Security verification failed!"
@@ -1801,22 +1644,18 @@ run_full_hardening() {
         fi
     fi
 
-    # Phase 7: SSH testing and service restart
     echo "${BLU}Phase 7: Service Configuration${NC}"
     test_ssh_connection
     restart_services
 
-    # Phase 8: Final lockdown
     echo "${BLU}Phase 8: Final Security Lockdown${NC}"
     lock_default_accounts
 
-    # Mark as completed
     save_state "completed"
 
     echo
     succ "=== HARDENING PROCESS COMPLETED SUCCESSFULLY ==="
 
-    # Show final summary
     show_final_summary
 }
 
@@ -1880,20 +1719,19 @@ show_final_summary() {
     read -rp "Press Enter to continue..."
 }
 
-# ---------- Main Program Logic ----------
 main() {
-    # Trap signals
+    local choice=""
+    local step=""
+    local rb_choice=""
+
     trap 'echo "Script interrupted"; exit 130' INT TERM
 
-    # Initialize
     setup_logging
     init_state_system
     load_state
     COMPLETED_STEPS=${COMPLETED_STEPS:-""}
-    # Validate system first
     validate_system
 
-    # Main menu loop
     while true; do
         show_main_menu
         read -rp "Select option [0-9]: " choice
@@ -1987,7 +1825,6 @@ main() {
     done
 }
 
-# Execute main function if script is run directly
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     main "$@"
 fi
