@@ -317,25 +317,49 @@ install_docker() {
 
     log "Installing Docker"
 
+    # Install prerequisites
     sudo apt-get update
     sudo apt-get install -y ca-certificates curl gnupg
     sudo install -m 0755 -d /etc/apt/keyrings
 
-    (
-        umask 022
-        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | \
-        sudo gpg --dearmor -o /etc/apt/keyrings/docker.asc
-    )
-    sudo chmod a+r /etc/apt/keyrings/docker.asc
+    # Download and verify Docker's GPG key
+    local key_url="https://download.docker.com/linux/ubuntu/gpg"
+    local key_file="/etc/apt/keyrings/docker.asc"
+    local expected_fingerprint="7EA0A9C3F273FCD8"
 
-    echo \
-        "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
-        https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+    if ! curl -fsSL "$key_url" | sudo gpg --dearmor -o "$key_file"; then
+        die "Failed to download Docker GPG key"
+    fi
+    sudo chmod a+r "$key_file"
+
+    # Verify the GPG key fingerprint
+    local fingerprint
+    fingerprint=$(gpg --show-keys --with-fingerprint "$key_file" | grep -A 1 "pub" | tail -n 1 | awk '{print $2}' | tr -d ':')
+    if [[ "$fingerprint" != "$expected_fingerprint" ]]; then
+        die "GPG key fingerprint mismatch. Expected: $expected_fingerprint, Got: $fingerprint"
+    fi
+
+    # Add Docker repository
+    local codename
+    codename=$(. /etc/os-release && echo "$VERSION_CODENAME")
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=$key_file] https://download.docker.com/linux/ubuntu $codename stable" | \
         sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
 
-    sudo apt-get update
-    sudo apt-get install -y docker-ce docker-ce-cli containerd.io \
-                            docker-buildx-plugin docker-compose-plugin
+    # Update package list and install Docker
+    if ! sudo apt-get update; then
+        die "Failed to update package lists after adding Docker repository"
+    fi
+    if ! sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; then
+        die "Failed to install Docker packages"
+    fi
+
+    # Verify Docker service
+    if ! sudo systemctl enable docker; then
+        warn "Failed to enable Docker service"
+    fi
+    if ! sudo systemctl start docker; then
+        die "Failed to start Docker service"
+    fi
 
     succ "Docker installed successfully"
 }
