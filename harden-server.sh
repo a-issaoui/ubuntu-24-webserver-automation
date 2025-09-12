@@ -2,13 +2,13 @@
 set -euo pipefail
 
 ################################################################################
-# Ubuntu Server 24.04 LTS Hardening Script - Enhanced Edition
+# Ubuntu Server 24.04 LTS Hardening Script - Enhanced Edition v3.1
 # Compatible with Ubuntu 24.04 LTS with CLI interface and rollback options
 # Run as user with sudo privileges
 ################################################################################
 
 # ---------- Configuration ----------
-readonly SCRIPT_VERSION="3.0"
+readonly SCRIPT_VERSION="3.1"
 readonly SCRIPT_NAME="Ubuntu Hardening Tool"
 readonly CONFIG_FILE="/etc/hardening/config"
 readonly STATE_FILE="/etc/hardening/state"
@@ -208,16 +208,19 @@ create_backup() {
 }
 
 restore_backup() {
-    local file="$1"
-    local backup_pattern="$BACKUP_DIR/$(basename "$file").*"
+    local file backup_dir newest_backup
+    file=$1
+    backup_dir=${2:-$BACKUP_DIR}
 
-    # Find the most recent backup
-    local latest_backup
-    latest_backup=$(sudo find "$BACKUP_DIR" -name "$(basename "$file").*" -type f 2>/dev/null | sort | tail -n 1)
+    # Find newest backup using mtime - NUL-safe approach
+    newest_backup=$(sudo find "$backup_dir" -type f \
+        -name "$(basename "$file").*" \
+        -printf '%T@ %p\0' 2>/dev/null | \
+        sort -zn | tail -z -n 1 | cut -zd' ' -f2-)
 
-    if [[ -n "$latest_backup" && -f "$latest_backup" ]]; then
-        sudo cp "$latest_backup" "$file"
-        log "Restored $file from backup"
+    if [[ -n "$newest_backup" && -f "$newest_backup" ]]; then
+        sudo cp --no-preserve=timestamps "$newest_backup" "$file"
+        log "Restored $file from $newest_backup"
         return 0
     else
         warn "No backup found for $file"
@@ -288,27 +291,36 @@ install_packages() {
 }
 
 install_docker() {
-    if command -v docker &> /dev/null; then
+    if command -v docker &>/dev/null; then
         log "Docker already installed"
         return 0
     fi
 
     log "Installing Docker"
 
-    # Add Docker's official GPG key
+    # Update package list and install prerequisites
     sudo apt-get update
-    sudo apt-get install -y ca-certificates curl
+    sudo apt-get install -y ca-certificates curl gnupg
     sudo install -m 0755 -d /etc/apt/keyrings
-    sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+
+    # Add Docker's official GPG key - atomic operation with proper umask
+    (
+        umask 022
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | \
+        sudo gpg --dearmor -o /etc/apt/keyrings/docker.asc
+    )
     sudo chmod a+r /etc/apt/keyrings/docker.asc
 
-    # Add Docker repository
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
-        sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+    # Add Docker repository - idempotent operation
+    echo \
+        "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
+        https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+        sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
 
-    # Install Docker
+    # Install Docker packages
     sudo apt-get update
-    sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    sudo apt-get install -y docker-ce docker-ce-cli containerd.io \
+                            docker-buildx-plugin docker-compose-plugin
 
     succ "Docker installed successfully"
 }
@@ -961,17 +973,17 @@ lock_default_accounts() {
 
     log "Locking default accounts (FINAL SECURITY STEP)"
 
-    # Lock ubuntu user if it exists
+    # Lock ubuntu user if it exists - using idiomatic commands
     if id ubuntu &>/dev/null; then
-        sudo passwd -l ubuntu
-        sudo usermod --expiredate 1970-01-01 ubuntu
+        sudo usermod -L ubuntu
+        sudo chage -E 0 ubuntu
         sudo usermod --shell /usr/sbin/nologin ubuntu
         succ "Ubuntu account locked and disabled"
     fi
 
-    # Lock root account
-    sudo passwd -l root
-    sudo usermod --expiredate 1970-01-01 root
+    # Lock root account - using idiomatic commands
+    sudo usermod -L root
+    sudo chage -E 0 root
     succ "Root account locked"
 
     # Remove ubuntu from sudo group
@@ -1074,16 +1086,28 @@ rollback_user() {
         sudo rm -f "/etc/sudoers.d/99-$NEW_USER"
     fi
 
-    # Unlock ubuntu account
+    # Unlock ubuntu account - using idiomatic commands
     if id ubuntu &>/dev/null; then
-        sudo passwd -u ubuntu
-        sudo usermod --expiredate "" ubuntu
+        sudo usermod -U ubuntu
+        sudo chage -E -1 ubuntu
         sudo usermod --shell /bin/bash ubuntu
         sudo usermod -aG sudo ubuntu
         log "Ubuntu account restored"
     fi
 
     succ "User changes rolled back"
+}
+
+rollback_docker_systemd() {
+    log "Rolling back Docker systemd overrides"
+    if [[ -d /etc/systemd/system/docker.service.d ]]; then
+        sudo rm -rf /etc/systemd/system/docker.service.d
+        sudo systemctl daemon-reload
+        sudo systemctl restart docker
+        log "Docker systemd overrides removed"
+    else
+        log "No Docker systemd overrides to remove"
+    fi
 }
 
 full_rollback() {
@@ -1105,6 +1129,7 @@ full_rollback() {
     # Rollback in reverse order
     rollback_kernel
     rollback_firewall
+    rollback_docker_systemd
     rollback_ssh
     rollback_user
 
@@ -1146,10 +1171,10 @@ show_status() {
 
 show_main_menu() {
     clear
-    echo "${CYN}╔══════════════════════════════════════════════╗${NC}"
-    echo "${CYN}║        Ubuntu 24.04 LTS Hardening Tool      ║${NC}"
+    echo "${CYN}╔═══════════════════════════════════════════════╗${NC}"
+    echo "${CYN}║        Ubuntu 24.04 LTS Hardening Tool       ║${NC}"
     echo "${CYN}║                Version $SCRIPT_VERSION                   ║${NC}"
-    echo "${CYN}╚══════════════════════════════════════════════╝${NC}"
+    echo "${CYN}╚═══════════════════════════════════════════════╝${NC}"
 
     show_status
 
@@ -1196,7 +1221,8 @@ show_rollback_menu() {
     echo "  2) Rollback Firewall Settings"
     echo "  3) Rollback Kernel Hardening"
     echo "  4) Rollback User Changes"
-    echo "  5) Full System Rollback"
+    echo "  5) Rollback Docker Systemd Overrides"
+    echo "  6) Full System Rollback"
     echo "  0) Back to Main Menu"
     echo
 }
@@ -1465,9 +1491,9 @@ run_full_hardening() {
 
 show_final_summary() {
     clear
-    echo "${GRN}╔════════════════════════════════════════════════════╗${NC}"
+    echo "${GRN}╔═══════════════════════════════════════════════════╗${NC}"
     echo "${GRN}║           HARDENING COMPLETED SUCCESSFULLY        ║${NC}"
-    echo "${GRN}╚════════════════════════════════════════════════════╝${NC}"
+    echo "${GRN}╚═══════════════════════════════════════════════════╝${NC}"
     echo
     echo "${BLU}System Details:${NC}"
     echo "  Server: $(hostname)"
@@ -1581,13 +1607,14 @@ main() {
             8)
                 while true; do
                     show_rollback_menu
-                    read -rp "Select rollback option [0-5]: " rb_choice
+                    read -rp "Select rollback option [0-6]: " rb_choice
                     case "$rb_choice" in
                         1) rollback_ssh ;;
                         2) rollback_firewall ;;
                         3) rollback_kernel ;;
                         4) rollback_user ;;
-                        5) full_rollback ;;
+                        5) rollback_docker_systemd ;;
+                        6) full_rollback ;;
                         0) break ;;
                         *) echo "Invalid option" ;;
                     esac
