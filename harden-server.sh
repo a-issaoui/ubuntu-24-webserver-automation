@@ -1006,10 +1006,14 @@ EOF
 [Service]
 ExecStart=
 ExecStart=/usr/bin/dockerd --containerd=/run/containerd/containerd.sock
+# Docker-compatible security settings
 NoNewPrivileges=yes
-ProtectKernelTunables=yes
-ProtectControlGroups=yes
 RestrictSUIDSGID=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/docker /var/run/docker.sock /run/docker /var/log
+# Note: ProtectKernelTunables and ProtectControlGroups break Docker networking
 EOF
 
     sudo systemctl daemon-reload
