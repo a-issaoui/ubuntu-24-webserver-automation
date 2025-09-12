@@ -322,20 +322,36 @@ install_docker() {
     sudo apt-get install -y ca-certificates curl gnupg
     sudo install -m 0755 -d /etc/apt/keyrings
 
-    # Download and verify Docker's GPG key
+    # Download Docker's GPG key with retries
     local key_url="https://download.docker.com/linux/ubuntu/gpg"
     local key_file="/etc/apt/keyrings/docker.asc"
-    local expected_fingerprint="7EA0A9C3F273FCD8"
+    local expected_fingerprint="9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
+    local max_retries=3
+    local retry_count=0
+    local success=false
 
-    if ! curl -fsSL "$key_url" | sudo gpg --dearmor -o "$key_file"; then
-        die "Failed to download Docker GPG key"
+    # Remove existing key file to avoid overwrite prompt
+    sudo rm -f "$key_file"
+
+    while [ $retry_count -lt $max_retries ]; do
+        if curl -fsSL "$key_url" | sudo gpg --dearmor -o "$key_file"; then
+            success=true
+            break
+        fi
+        ((retry_count++))
+        log "Failed to download GPG key, retrying ($retry_count/$max_retries)..."
+        sleep 2
+    done
+
+    if [ "$success" != "true" ]; then
+        die "Failed to download Docker GPG key after $max_retries attempts"
     fi
     sudo chmod a+r "$key_file"
 
     # Verify the GPG key fingerprint
     local fingerprint
-    fingerprint=$(gpg --show-keys --with-fingerprint "$key_file" | grep -A 1 "pub" | tail -n 1 | awk '{print $2}' | tr -d ':')
-    if [[ "$fingerprint" != "$expected_fingerprint" ]]; then
+    fingerprint=$(sudo gpg --show-keys --with-fingerprint "$key_file" | grep -A 1 "pub" | tail -n 1 | awk '{print $2}' | tr -d ':')
+    if [ "$fingerprint" != "$expected_fingerprint" ]; then
         die "GPG key fingerprint mismatch. Expected: $expected_fingerprint, Got: $fingerprint"
     fi
 
