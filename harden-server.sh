@@ -959,6 +959,25 @@ secure_docker() {
     sudo groupadd -f docker
     sudo usermod -aG docker "$NEW_USER"
 
+    # Check if IP forwarding is disabled by hardening and enable it for Docker
+    if [[ -f /etc/sysctl.d/99-hardening.conf ]]; then
+        if grep -q "^net.ipv4.ip_forward = 0" /etc/sysctl.d/99-hardening.conf; then
+            warn "Kernel hardening disabled IP forwarding, but Docker requires it"
+            warn "Creating Docker-specific override to enable IP forwarding"
+
+            # Create Docker-specific sysctl override
+            sudo tee /etc/sysctl.d/docker.conf > /dev/null <<EOF
+# Docker networking requirements
+# Override hardening setting for Docker compatibility
+net.ipv4.ip_forward = 1
+EOF
+
+            # Apply the override
+            sudo sysctl -p /etc/sysctl.d/docker.conf
+            log "IP forwarding enabled for Docker networking"
+        fi
+    fi
+
     sudo mkdir -p /etc/docker
     cat <<'EOF' | sudo tee /etc/docker/daemon.json > /dev/null
 {
@@ -994,11 +1013,24 @@ RestrictSUIDSGID=yes
 EOF
 
     sudo systemctl daemon-reload
-    sudo systemctl restart docker
+
+    # Test Docker start before marking complete
+    if ! sudo systemctl restart docker; then
+        error "Docker failed to start after security configuration"
+        error "Check 'sudo journalctl -xeu docker.service' for details"
+        return 1
+    fi
+
+    # Verify Docker is running
+    if ! sudo systemctl is-active --quiet docker; then
+        error "Docker service is not active after restart"
+        return 1
+    fi
+
     sudo systemctl enable docker
 
     mark_step_completed "secure_docker"
-    succ "Docker security configuration applied"
+    succ "Docker security configuration applied and service verified"
 }
 
 test_ssh_connection() {
