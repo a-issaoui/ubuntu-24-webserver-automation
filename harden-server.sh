@@ -319,7 +319,7 @@ install_docker() {
 
     # Install prerequisites
     sudo apt-get update
-    sudo apt-get install -y ca-certificates curl gnupg
+    sudo apt-get install -y ca-certificates curl
     sudo install -m 0755 -d /etc/apt/keyrings
 
     # Download Docker's GPG key with retries
@@ -333,7 +333,7 @@ install_docker() {
     sudo rm -f "$key_file"
 
     while [ $retry_count -lt $max_retries ]; do
-        if curl -fsSL "$key_url" | sudo gpg --dearmor --batch --yes -o "$key_file"; then
+        if sudo curl -fsSL "$key_url" -o "$key_file"; then
             success=true
             break
         fi
@@ -1380,7 +1380,7 @@ show_individual_steps_menu() {
     echo "  8) Configure System Auditing"
     echo "  9) Setup AIDE (File Integrity)"
     echo " 10) Configure Automatic Updates"
-    echo " 11) Secure Docker"
+    echo "  11) Secure Docker"
     echo " 12) Lock Default Accounts"
     echo " 13) Enforce AppArmor Profiles"
     echo " 14) Apply Mount-option Hardening"
