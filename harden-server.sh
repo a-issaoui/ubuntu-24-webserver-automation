@@ -1889,7 +1889,7 @@ main() {
     setup_logging
     init_state_system
     load_state
-
+    COMPLETED_STEPS=${COMPLETED_STEPS:-""}
     # Validate system first
     validate_system
 
