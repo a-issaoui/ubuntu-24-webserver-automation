@@ -1,4 +1,4 @@
-# 🔐 Docker Web Server Hardening Script
+# 🔐 Ubuntu 24.04 LTS Web Server Hardening Script
 
 [![Ubuntu](https://img.shields.io/badge/Ubuntu-24.04%20LTS-E95420?style=flat&logo=ubuntu)](https://ubuntu.com/)
 [![Docker](https://img.shields.io/badge/Docker-CE-2496ED?style=flat&logo=docker)](https://docker.com/)
