@@ -193,7 +193,11 @@ EOF
     run_cmd sudo chmod 640 /etc/ssmtp/ssmtp.conf
     run_cmd sudo chown root:mail /etc/ssmtp/ssmtp.conf
 
+    # Add the new user to mail group so it can use ssmtp
+    run_cmd sudo usermod -a -G mail "$NEW_USER"
+
     succ "ssmtp configured for Gmail"
+    log "Added $NEW_USER user to mail group"
 }
 
 install_packages() {
