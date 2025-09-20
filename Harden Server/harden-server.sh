@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ------------------------------------------------------------------
-# Optimized Docker Web Server Hardening Script - FIXED VERSION
+# Optimized Docker Web Server Hardening Script - SSMTP VERSION
 # Ubuntu 24.04 LTS - Fully Automated, Zero Interaction
 # Run with: ./harden-docker.sh [options]
 # ------------------------------------------------------------------
@@ -12,7 +12,7 @@ sudo touch /var/log/harden-docker.log
 sudo chmod 640 /var/log/harden-docker.log
 exec > >(sudo tee /var/log/harden-docker.log) 2>&1
 
-readonly SCRIPT_VERSION="2.2.0"
+readonly SCRIPT_VERSION="2.3.0"
 readonly RED=$'\e[31m' GRN=$'\e[32m' YLW=$'\e[33m' BLU=$'\e[34m' NC=$'\e[0m'
 
 # Configuration
@@ -20,6 +20,8 @@ SSH_PORT=""
 NEW_USER="deploy"
 SSH_KEY=""
 EMAIL=""
+GMAIL_USER=""
+GMAIL_APP_PASSWORD=""
 RESTRICT_IP=""
 TIMEZONE="UTC"
 KEEP_SWAP=false
@@ -40,6 +42,8 @@ while [[ $# -gt 0 ]]; do
         --ssh-port)             SSH_PORT="$2"; shift 2 ;;
         --ssh-key)              SSH_KEY="$2"; shift 2 ;;
         --email)                EMAIL="$2"; shift 2 ;;
+        --gmail-user)           GMAIL_USER="$2"; shift 2 ;;
+        --gmail-app-password)   GMAIL_APP_PASSWORD="$2"; shift 2 ;;
         --restrict-ip)          RESTRICT_IP="$2"; shift 2 ;;
         --timezone)             TIMEZONE="$2"; shift 2 ;;
         --keep-swap)            KEEP_SWAP=true; shift ;;
@@ -51,7 +55,7 @@ while [[ $# -gt 0 ]]; do
         --fail2ban-bantime)     FAIL2BAN_BANTIME="$2"; shift 2 ;;
         --dry-run)              DRY_RUN=true; shift ;;
         --skip-bench)           SKIP_BENCH=true; shift ;;
-        --install-mail-utils) INSTALL_MAIL_UTILS=true; shift ;;
+        --install-mail-utils)   INSTALL_MAIL_UTILS=true; shift ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
@@ -95,6 +99,18 @@ validate_inputs() {
 
     [[ "$TIMEZONE" != "" ]] || TIMEZONE="UTC"
     [[ "$FAIL2BAN_BANTIME" =~ ^-?[0-9]+$ ]] || die "Invalid fail2ban bantime: $FAIL2BAN_BANTIME"
+
+    # Validate email configuration if mail utils are requested
+    if $INSTALL_MAIL_UTILS; then
+        if [[ -n "$GMAIL_USER" ]] && [[ -n "$GMAIL_APP_PASSWORD" ]]; then
+            # Gmail SMTP configuration provided
+            log "Gmail SMTP configuration detected"
+        elif [[ -n "$EMAIL" ]]; then
+            warn "Email provided but no Gmail SMTP config. Email functionality will be limited."
+        else
+            warn "Mail utils requested but no email configuration provided"
+        fi
+    fi
 
     # Validate SSH key format
     if ! echo "$SSH_KEY" | ssh-keygen -l -f - >/dev/null 2>&1; then
@@ -157,31 +173,27 @@ update_system() {
 
     succ "System updated"
 }
-# Function to configure Postfix non-interactively
-configure_postfix() {
-    log "Configuring Postfix non-interactively"
 
-    # Set Postfix configuration options
-    echo "postfix postfix/mailname string $(hostname -f)" | run_cmd sudo debconf-set-selections
-    echo "postfix postfix/main_mailer_type string 'Internet Site'" | run_cmd sudo debconf-set-selections
-    echo "postfix postfix/destinations string localhost" | run_cmd sudo debconf-set-selections
+# Function to configure ssmtp for Gmail
+configure_ssmtp() {
+    log "Configuring ssmtp for Gmail SMTP"
 
-    # Configure main.cf with sensible defaults
-    run_cmd sudo postconf -e "myhostname = $(hostname -f)"
-    run_cmd sudo postconf -e "mydomain = $(hostname -d)"
-    run_cmd sudo postconf -e "myorigin = \$mydomain"
-    run_cmd sudo postconf -e "mydestination = \$myhostname, localhost.\$mydomain, localhost, \$mydomain"
-    run_cmd sudo postconf -e "relayhost ="
-    run_cmd sudo postconf -e "mynetworks = 127.0.0.0/8 [::ffff:127.0.0.0]/104 [::1]/128"
-    run_cmd sudo postconf -e "mailbox_size_limit = 0"
-    run_cmd sudo postconf -e "recipient_delimiter = +"
-    run_cmd sudo postconf -e "inet_interfaces = loopback-only"
-    run_cmd sudo postconf -e "inet_protocols = all"
+    # Create ssmtp configuration
+    sudo tee /tmp/ssmtp.conf.$$ >/dev/null <<EOF
+root=$GMAIL_USER
+mailhub=smtp.gmail.com:587
+rewriteDomain=gmail.com
+AuthUser=$GMAIL_USER
+AuthPass=$GMAIL_APP_PASSWORD
+FromLineOverride=YES
+UseSTARTTLS=YES
+EOF
 
-    # Restart Postfix to apply changes
-    run_cmd sudo systemctl restart postfix || warn "Failed to restart postfix; continuing"
+    run_cmd sudo mv /tmp/ssmtp.conf.$$ /etc/ssmtp/ssmtp.conf
+    run_cmd sudo chmod 640 /etc/ssmtp/ssmtp.conf
+    run_cmd sudo chown root:mail /etc/ssmtp/ssmtp.conf
 
-    succ "Postfix configured automatically"
+    succ "ssmtp configured for Gmail"
 }
 
 install_packages() {
@@ -192,21 +204,20 @@ install_packages() {
 
     # Install mail utilities if requested
     if $INSTALL_MAIL_UTILS; then
-        log "Installing mail utilities for email alerts"
+        log "Installing ssmtp for lightweight email functionality"
 
-        # Set debconf selections for non-interactive installation
-        echo "postfix postfix/mailname string $(hostname -f)" | run_cmd sudo debconf-set-selections
-        echo "postfix postfix/main_mailer_type string 'Internet Site'" | run_cmd sudo debconf-set-selections
+        run_cmd sudo apt install -y ssmtp || warn "Failed to install ssmtp; continuing"
 
-        run_cmd sudo apt install -y mailutils postfix || warn "Failed to install mailutils/postfix; continuing"
+        # Configure ssmtp if Gmail credentials provided
+        if [[ -n "$GMAIL_USER" ]] && [[ -n "$GMAIL_APP_PASSWORD" ]]; then
+            configure_ssmtp
 
-        # Configure Postfix automatically
-        configure_postfix
+            # Test email functionality if recipient email is provided
+            if [[ -n "$EMAIL" ]]; then
+                log "Testing email functionality to $EMAIL"
 
-        # Test email functionality if email is provided
-        if [[ -n "$EMAIL" ]]; then
-            log "Testing email functionality to $EMAIL"
-            echo "Server hardening completed successfully on $(hostname) at $(date)
+                # Create test email content
+                local test_message="Server hardening completed successfully on $(hostname) at $(date)
 
 SSH Port: $SSH_PORT
 Admin User: $NEW_USER
@@ -214,12 +225,17 @@ Firewall: Active
 Fail2ban: Active
 Docker: Installed and secured
 
-This is an automated test email from your hardened server." | \
-                run_cmd sudo mail -s "Server Hardening Complete - $(hostname)" "$EMAIL" && \
-                succ "Test email sent to $EMAIL" || \
-                warn "Email test failed; check 'sudo tail -f /var/log/mail.log' for errors"
+This is an automated test email from your hardened server sent via ssmtp/Gmail."
+
+                # Send test email using ssmtp
+                echo "$test_message" | run_cmd ssmtp "$EMAIL" && \
+                    succ "Test email sent to $EMAIL via Gmail SMTP" || \
+                    warn "Email test failed; check ssmtp configuration"
+            else
+                warn "Gmail SMTP configured but no recipient email provided for testing"
+            fi
         else
-            warn "Email not provided; skipping email test"
+            warn "ssmtp installed but no Gmail credentials provided. Configure manually in /etc/ssmtp/ssmtp.conf"
         fi
     fi
 
@@ -641,6 +657,13 @@ else
 fi
 
 printf "%-15s : %s\n" Docker-Bench "$( [ -f /var/log/docker-bench.log ] && stat -c %y /var/log/docker-bench.log | cut -d' ' -f1 || echo Never )"
+
+# Check email configuration
+if [ -f /etc/ssmtp/ssmtp.conf ]; then
+    printf "%-15s : %s\n" Email-Config "ssmtp configured"
+else
+    printf "%-15s : %s\n" Email-Config "Not configured"
+fi
 EOF
 
     run_cmd sudo mv /tmp/security-check.$$ /usr/local/bin/security-check
@@ -672,7 +695,7 @@ EOF
     # Configure auditd rules - FIXED: Using syscall numbers instead of names
     log "Configuring auditd rules"
 
-    sudo tee /tmp/audit-harden.rules.$$ >/dev/null <<EOF
+    sudo tee /tmp/audit-harden.rules.$ >/dev/null <<EOF
 # Monitor critical system files
 -w /etc/passwd -p wa -k passwd_changes
 -w /etc/shadow -p wa -k shadow_changes
@@ -683,7 +706,7 @@ EOF
 -a always,exit -F arch=b64 -S 105 -S 106 -S 109 -k account_changes
 EOF
 
-    run_cmd sudo mv /tmp/audit-harden.rules.$$ /etc/audit/rules.d/harden.rules
+    run_cmd sudo mv /tmp/audit-harden.rules.$ /etc/audit/rules.d/harden.rules
     run_cmd sudo augenrules --load || warn "Failed to load auditd rules; continuing"
 
     # Write version log
@@ -723,6 +746,7 @@ Auto-updates     : Enabled$( [[ -n "$EMAIL" ]] && echo " (alerts → $EMAIL)" )
 HTTP restriction : $( [[ -n "$RESTRICT_IP" ]] && echo "$RESTRICT_IP" || echo "None" )
 Swap             : $( $KEEP_SWAP && echo "Enabled" || echo "Disabled" )
 Auditd           : Active
+Email system     : $( $INSTALL_MAIL_UTILS && echo "ssmtp configured" || echo "Not installed" )$( [[ -n "$GMAIL_USER" ]] && echo " (Gmail SMTP)" || echo "" )
 
 ${YLW}NEXT STEPS${NC}
 1. SSH will restart on port $SSH_PORT in 5 seconds (current connection may drop)
@@ -734,6 +758,14 @@ EOF
             echo "4. System will reboot 10 seconds after SSH restart..."
         else
             echo "4. Skipping reboot (--no-reboot specified)"
+        fi
+
+        if $INSTALL_MAIL_UTILS && [[ -n "$GMAIL_USER" ]]; then
+            echo ""
+            echo "${YLW}EMAIL CONFIGURATION${NC}"
+            echo "ssmtp configured for Gmail SMTP ($GMAIL_USER)"
+            echo "Test with: echo 'Test message' | ssmtp your-email@example.com"
+            echo "Config file: /etc/ssmtp/ssmtp.conf"
         fi
     } | run_cmd sudo tee "$summary_file" >/dev/null
 
@@ -767,7 +799,7 @@ EOF
 
 # Main execution with error handling
 main() {
-    echo "${BLU}Optimized Docker Web Server Hardening v$SCRIPT_VERSION${NC}"
+    echo "${BLU}Optimized Docker Web Server Hardening v$SCRIPT_VERSION (ssmtp edition)${NC}"
     echo "Start time: $(date '+%Y-%m-%d %H:%M:%S %Z')"
 
     if $DRY_RUN; then

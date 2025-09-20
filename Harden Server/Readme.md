@@ -33,6 +33,10 @@ A **robust, fully automated** Bash tool designed to secure Ubuntu 24.04 LTS serv
 <td>Kernel parameters, auditd monitoring, automatic updates</td>
 </tr>
 <tr>
+<td>📧 <strong>Email Alerts</strong></td>
+<td>Lightweight ssmtp with Gmail SMTP for security notifications</td>
+</tr>
+<tr>
 <td>📊 <strong>Monitoring & Logging</strong></td>
 <td>Comprehensive logging and security status checks</td>
 </tr>
@@ -81,12 +85,34 @@ Get-Content ~/.ssh/id_ed25519-ubuntu25.pub | Set-Clipboard
 cat ~/.ssh/id_ed25519-ubuntu25.pub
 ```
 
-### 3. Run the Script
+### 3. Setup Gmail App Password (Optional, for email alerts)
 
-**Basic usage:**
+To receive security notifications via email:
+
+1. **Enable 2-Factor Authentication** on your Gmail account
+2. **Generate App Password:**
+   - Go to [Google Account Security](https://myaccount.google.com/security)
+   - Security → 2-Step Verification → App passwords
+   - Generate password for "Mail"
+   - Copy the 16-character password (e.g., `abcd efgh ijkl mnop`)
+
+### 4. Run the Script
+
+**Basic usage (no email):**
 
 ```bash
 ./harden-docker.sh --ssh-key "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIM6L... ubuntu25-deploy"
+```
+
+**With email notifications:**
+
+```bash
+./harden-docker.sh \
+  --ssh-key "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIM6L... ubuntu25-deploy" \
+  --install-mail-utils \
+  --gmail-user "your-email@gmail.com" \
+  --gmail-app-password "abcdefghijklmnop" \
+  --email "admin@yourdomain.com"
 ```
 
 **Advanced usage:**
@@ -96,23 +122,26 @@ cat ~/.ssh/id_ed25519-ubuntu25.pub
   --ssh-key "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIM6L... ubuntu25-deploy" \
   --ssh-port 22222 \
   --user webadmin \
-  --email admin@example.com \
+  --install-mail-utils \
+  --gmail-user "notifications@company.com" \
+  --gmail-app-password "abcdefghijklmnop" \
+  --email "admin@company.com" \
   --restrict-ip 192.168.1.0/24 \
-  --timezone America/New_York \
-  --install-mail-utils
+  --timezone America/New_York
 ```
 
 ---
 
 ## ⚡ Prerequisites
 
-| Requirement   | Details                                                    |
-| ------------- | ---------------------------------------------------------- |
-| **OS**        | Fresh Ubuntu 24.04 LTS (server edition recommended)        |
-| **User**      | Non-root user with sudo privileges (or use `--allow-root`) |
-| **Internet**  | Required for package updates and Docker GPG key            |
-| **SSH Key**   | Ed25519 public key for secure access                       |
-| **Resources** | Min: 512MB RAM, 2GB disk space (1GB+ RAM recommended)      |
+| Requirement          | Details                                                    |
+| -------------------- | ---------------------------------------------------------- |
+| **OS**               | Fresh Ubuntu 24.04 LTS (server edition recommended)        |
+| **User**             | Non-root user with sudo privileges (or use `--allow-root`) |
+| **Internet**         | Required for package updates and Docker GPG key            |
+| **SSH Key**          | Ed25519 public key for secure access                       |
+| **Resources**        | Min: 512MB RAM, 2GB disk space (1GB+ RAM recommended)      |
+| **Gmail** (optional) | App Password for email notifications                       |
 
 **Pre-installed tools:** `curl`, `openssl`, `gpg`, `dpkg`, `apt`, `jq`
 
@@ -128,7 +157,9 @@ cat ~/.ssh/id_ed25519-ubuntu25.pub
 | `--user <name>`             | Admin user for SSH/sudo/Docker                 | `deploy`    | No       |
 | `--ssh-port <port>`         | Custom SSH port (1-65535)                      | `2222`      | No       |
 | `--ssh-key <key>`           | SSH public key (Ed25519 recommended)           | None        | **Yes**  |
-| `--email <addr>`            | Email for update alerts and test message       | None        | No       |
+| `--email <addr>`            | Email for update alerts and notifications      | None        | No       |
+| `--gmail-user <email>`      | Gmail address for SMTP authentication          | None        | No       |
+| `--gmail-app-password <pw>` | Gmail App Password (16 chars, no spaces)       | None        | No       |
 | `--restrict-ip <ip/cidr>`   | Restrict HTTP/HTTPS to IP or CIDR              | None (open) | No       |
 | `--timezone <tz>`           | System timezone                                | `UTC`       | No       |
 | `--keep-swap`               | Preserve swap (disabled by default)            | `false`     | No       |
@@ -140,7 +171,7 @@ cat ~/.ssh/id_ed25519-ubuntu25.pub
 | `--fail2ban-bantime <secs>` | Fail2ban ban duration (-1 for permanent)       | `3600`      | No       |
 | `--dry-run`                 | Simulate without changes                       | `false`     | No       |
 | `--skip-bench`              | Skip Docker Bench Security test                | `false`     | No       |
-| `--install-mail-utils`      | Install mailutils/postfix for alerts           | `false`     | No       |
+| `--install-mail-utils`      | Install ssmtp for lightweight email alerts     | `false`     | No       |
 
 </details>
 
@@ -177,6 +208,56 @@ cat ~/.ssh/id_ed25519-ubuntu25.pub
 - ✅ **Automatic updates** - Daily security patches
 - ✅ **Intrusion detection** - Fail2ban for SSH and web services
 
+### Email Notifications
+
+- ✅ **Lightweight ssmtp** - Simple, secure email delivery
+- ✅ **Gmail SMTP** - Reliable delivery via Google's servers
+- ✅ **Security alerts** - Automatic update notifications
+- ✅ **Test functionality** - Verification email sent on completion
+
+---
+
+## 📧 Email Configuration
+
+The script uses **ssmtp** for lightweight email functionality instead of heavy Postfix:
+
+### Setup Process
+
+1. **Install ssmtp** with `--install-mail-utils`
+2. **Provide Gmail credentials** via `--gmail-user` and `--gmail-app-password`
+3. **Specify recipient** with `--email`
+4. **Auto-configured** `/etc/ssmtp/ssmtp.conf`
+
+### Configuration Example
+
+```bash
+# Generated automatically by script
+root=notifications@company.com
+mailhub=smtp.gmail.com:587
+rewriteDomain=gmail.com
+AuthUser=notifications@company.com
+AuthPass=abcdefghijklmnop
+FromLineOverride=YES
+UseSTARTTLS=YES
+```
+
+### Manual Email Testing
+
+```bash
+# Send test email
+echo "Test message from server" | ssmtp admin@example.com
+
+# Check configuration
+sudo cat /etc/ssmtp/ssmtp.conf
+```
+
+### Email Features
+
+- **Security notifications** - System updates and alerts
+- **Hardening completion** - Confirmation with system details
+- **Fail2ban alerts** - Optional intrusion notifications
+- **Update notifications** - Automatic security patch alerts
+
 ---
 
 ## 📋 Post-Installation
@@ -193,6 +274,20 @@ ssh -p <new-port> <new-user>@<server-ip>
 sudo /usr/local/bin/security-check
 ```
 
+**Sample output:**
+
+```
+=== Security Status ===
+SSH             : active
+Firewall        : active
+Fail2ban        : OK
+Docker          : active
+Auditd          : active
+Auto-Updates    : OK
+Docker-Bench    : 2024-01-15
+Email-Config    : ssmtp configured
+```
+
 ### 3. Review Logs
 
 ```bash
@@ -206,7 +301,13 @@ sudo less /var/log/harden-docker-summary.log
 sudo less /var/log/docker-bench.log
 ```
 
-### 4. Manual Reboot (if `--no-reboot` was used)
+### 4. Test Email (if configured)
+
+```bash
+echo "Server monitoring test" | ssmtp your-email@domain.com
+```
+
+### 5. Manual Reboot (if `--no-reboot` was used)
 
 ```bash
 sudo reboot
@@ -277,14 +378,47 @@ sudo ufw reload
 **Problem:** No email notifications
 
 ```bash
-# Check mail logs
-sudo tail -f /var/log/mail.log
+# Check ssmtp configuration
+sudo cat /etc/ssmtp/ssmtp.conf
 
 # Test email manually
-echo "Test message" | mail -s "Test Subject" your-email@domain.com
+echo "Test message" | ssmtp your-email@domain.com
+
+# Check if ssmtp is installed
+which ssmtp
 ```
 
-**Requirements:** Use `--install-mail-utils` and `--email` flags
+**Common solutions:**
+
+- ✅ Ensure `--install-mail-utils` flag was used
+- ✅ Verify Gmail App Password is correct (16 characters, no spaces)
+- ✅ Check Gmail account has 2FA enabled
+- ✅ Confirm recipient email is valid
+
+</details>
+
+<details>
+<summary><strong>Gmail App Password Issues</strong></summary>
+
+**Problem:** Email authentication failed
+
+**Solutions:**
+
+1. **Regenerate App Password:**
+
+   - Delete old password in Google Account settings
+   - Create new App Password for "Mail"
+   - Update `/etc/ssmtp/ssmtp.conf` with new password
+
+2. **Check password format:**
+
+   ```bash
+   # App password should be 16 characters without spaces
+   AuthPass=abcdefghijklmnop  # ✅ Correct
+   AuthPass=abcd efgh ijkl mnop  # ❌ Wrong (has spaces)
+   ```
+
+3. **Verify 2FA is enabled** in your Google Account
 
 </details>
 
@@ -301,6 +435,9 @@ echo "Test message" | mail -s "Test Subject" your-email@domain.com
 > **Docker Containers**
 > Docker daemon restart is skipped by default to avoid disrupting running containers. Use `--force-docker-restart` when safe.
 
+> **Email Security**
+> Gmail App Passwords are stored in `/etc/ssmtp/ssmtp.conf` with 640 permissions (root:mail). Consider using a dedicated Gmail account for server notifications.
+
 ---
 
 ## 🎯 Known Limitations
@@ -311,7 +448,7 @@ echo "Test message" | mail -s "Test Subject" your-email@domain.com
 | **Swap Management**   | Disabled by default. Use `--keep-swap` for memory-constrained systems          |
 | **Docker Restart**    | Skipped to protect containers. Use `--force-docker-restart` when safe          |
 | **Audit Rules**       | x86_64-specific. Add 32-bit rules for mixed architectures                      |
-| **Rootless Docker**   | Not supported. Consider for enhanced container security                        |
+| **Gmail Only**        | ssmtp configured for Gmail SMTP. Manual config needed for other providers      |
 | **HTTPS Enforcement** | Port 443 opened but TLS not enforced. Configure nginx/Let's Encrypt separately |
 
 ---
@@ -324,7 +461,8 @@ We welcome contributions! Here are areas where help is needed:
 - 🐳 **Rootless Docker integration**
 - 📦 **Dynamic Docker Bench version detection**
 - 🔍 **Enhanced audit rules for 32-bit compatibility**
-- 📧 **Improved email notification system**
+- 📧 **Support for additional email providers (AWS SES, SendGrid)**
+- 🔐 **Integration with external secret management**
 
 ### How to Contribute
 
@@ -348,6 +486,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - **Docker CE** - Containerization platform
 - **CIS Benchmarks** - Security configuration standards
 - **Docker Bench Security v1.6.0** - Compliance verification tool
+- **ssmtp** - Lightweight email delivery solution
+- **Gmail SMTP** - Reliable email infrastructure
 
 ---
 
